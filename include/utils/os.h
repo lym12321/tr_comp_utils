@@ -3,8 +3,13 @@
 //
 
 #pragma once
+
+#include "FreeRTOS.h"
 #include "task.h"
 #include "bsp/sys.h"
+#include "bsp/def.h"
+
+#include <utility>
 
 namespace os {
     class task {
@@ -64,6 +69,40 @@ namespace os {
                 thunk->~Thunk();
                 vPortFree(thunk);
                 handle_ = nullptr;
+                return false;
+            }
+            return true;
+        }
+
+        template <typename Fn, typename Arg>
+        static bool static_create(Fn&& fn, Arg&& arg, const char *name, uint32_t stack_depth_words, Priority priority) {
+            using FnT = std::decay_t<Fn>;
+            using ArgT = std::decay_t<Arg>;
+
+            static_assert(std::is_invocable_r_v<void, FnT, ArgT>, "task expects callable: void fn(arg)");
+
+            struct Thunk {
+                FnT fn; ArgT arg;
+                static void port(void *p) {
+                    auto *self = static_cast <Thunk *> (p);
+                    self->fn(self->arg);
+                    vPortFree(self);
+                    vTaskDelete(nullptr);
+                }
+            };
+
+            void *mem = pvPortMalloc(sizeof(Thunk));
+            if (!mem) {
+                return false;
+            }
+
+            auto *thunk = new (mem) Thunk { std::forward <Fn> (fn), std::forward <Arg> (arg) };
+
+            BaseType_t ok =
+                xTaskCreate(&Thunk::port, name, stack_depth_words, thunk, static_cast <UBaseType_t> (priority), nullptr);
+            if (ok != pdPASS) {
+                thunk->~Thunk();
+                vPortFree(thunk);
                 return false;
             }
             return true;
