@@ -5,7 +5,7 @@
 #pragma once
 
 #include "bsp/uart.h"
-#include "bsp/uart.h"
+#include "bsp/usb.h"
 
 #include <array>
 
