@@ -37,7 +37,7 @@ static void log_va(const char *prefix, const char *fmt, va_list ap) {
         p = std::snprintf(_buf, sizeof(_buf), header_fmt, prefix, "isr");
     p += std::vsnprintf(_buf + p, sizeof(_buf) - p, fmt, ap);
     _buf[p ++] = '\n';
-    bsp_uart_send(_port, reinterpret_cast<const uint8_t*>(_buf), p);
+    bsp_uart_send_async(_port, reinterpret_cast<const uint8_t*>(_buf), p);
 }
 
 void logger::info(const char *fmt, ...) {
