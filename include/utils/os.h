@@ -11,10 +11,18 @@
 
 #include <utility>
 
+#include "cmsis_os2.h"
+
 namespace os {
     class task {
     public:
-        enum class Priority : UBaseType_t { IDLE = 0, LOW = 1, MEDIUM = 2, HIGH = 3, REALTIME = 4 };
+        enum class Priority : UBaseType_t {
+            IDLE = osPriorityIdle,
+            LOW = osPriorityLow,
+            MEDIUM = osPriorityNormal,
+            HIGH = osPriorityHigh,
+            REALTIME = osPriorityRealtime
+        };
 
         task() = default;
         explicit task(TaskHandle_t h) : handle_(h) {}
