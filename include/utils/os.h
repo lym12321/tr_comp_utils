@@ -10,6 +10,7 @@
 #include "bsp/def.h"
 
 #include <utility>
+#include <new>
 
 #include "cmsis_os2.h"
 
