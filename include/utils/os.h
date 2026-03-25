@@ -5,14 +5,14 @@
 #pragma once
 
 #include "FreeRTOS.h"
+#include "cmsis_os2.h"
+#include "queue.h"
 #include "task.h"
 #include "bsp/sys.h"
 #include "bsp/def.h"
 
 #include <utility>
 #include <new>
-
-#include "cmsis_os2.h"
 
 namespace os {
     class task {
@@ -187,5 +187,52 @@ namespace os {
 
             return false;
         }
+    };
+
+    template <typename T>
+    class queue {
+    public:
+        explicit queue(unsigned long length) : queue_(xQueueCreate(length, sizeof(T))) {}
+        bool send(const T &data) {
+            if(bsp_sys_in_isr()) {
+                BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+                auto re = xQueueSendFromISR(queue_, &data, &xHigherPriorityTaskWoken);
+                portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+                return re == pdTRUE;
+            } else {
+                return xQueueSend(queue_, &data, 0) == pdTRUE;
+            }
+        }
+
+        bool receive(T &data) {
+            if(bsp_sys_in_isr()) {
+                BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+                auto re = xQueueReceiveFromISR(queue_, &data, &xHigherPriorityTaskWoken);
+                portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+                return re == pdTRUE;
+            } else {
+                return xQueueReceive(queue_, &data, 0) == pdTRUE;
+            }
+        }
+
+        bool overwrite(T &data) {
+            if(bsp_sys_in_isr()) {
+                BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+                auto re = xQueueOverwriteFromISR(queue_, &data, &xHigherPriorityTaskWoken);
+                portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+                return re == pdTRUE;
+            } else {
+                return xQueueOverwrite(queue_, &data) == pdTRUE;
+            }
+        }
+
+        [[nodiscard]] bool reset() const { return xQueueReset(queue_) == pdTRUE; }
+
+        [[nodiscard]] unsigned long size() const {
+            return bsp_sys_in_isr() ?
+                uxQueueMessagesWaitingFromISR(queue_) : uxQueueMessagesWaiting(queue_);
+        }
+    private:
+        QueueHandle_t queue_;
     };
 }
