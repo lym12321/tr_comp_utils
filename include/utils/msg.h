@@ -6,8 +6,7 @@
 
 #include <cstring>
 
-#include "crc.h"
-#include "os.h"
+#include "utils/crc.h"
 #include "utils/os.h"
 #include "bsp/can.h"
 #include "bsp/time.h"
