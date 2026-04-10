@@ -77,6 +77,10 @@ namespace msg {
 
         static void callback(bsp_can_e port, uint32_t id, const uint8_t *data, size_t len) { self->handle(data, len); }
         void handle(const uint8_t *data, size_t len) {
+            if (ptr + len > sizeof(buf)) {
+                ptr = 0;
+                return;
+            }
             if (ptr == 0) {
                 if (data[0] != 0xa5 or data[1] != sizeof(T)) return;
                 memcpy(buf, data, len); ptr += len;
