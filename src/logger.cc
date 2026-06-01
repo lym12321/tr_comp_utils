@@ -29,7 +29,7 @@ constexpr char header_fmt[] = "[%s] <%s>: ";
 
 static void log_va(const char *prefix, const char *fmt, va_list ap) {
     if (!_inited) return;
-    static char _buf[256] = { };
+    char _buf[256] = { };
     int p;
     if (xPortIsInsideInterrupt() == pdFALSE)
         p = std::snprintf(_buf, sizeof(_buf), header_fmt, prefix, pcTaskGetName(nullptr));
