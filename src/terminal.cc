@@ -34,11 +34,10 @@ namespace terminal {
     static int mem_ptr = 0, mem_cur_ptr = 0;
 
     static volatile bool task_running = false, force_stop = false;
-    static os::task daemon_task, rx_task;
+    static os::task terminal_task;
     static QueueHandle_t rx_queue = nullptr;
     static StaticQueue_t rx_queue_cb;
     static uint8_t rx_queue_storage[128 * sizeof(uint8_t)];
-    std::pair<std::function<void(std::vector<std::string>)>, std::vector<std::string>> runtime;
 }
 
 static std::unordered_map <std::string, _cmd> cmd;
@@ -69,22 +68,6 @@ void terminal::info(const char* fmt, ...) {
 
 void show_prompt() {
     info("%s%s@%s:%s%s%s$\e[00m ", TERMINAL_COLOR_GREEN, "fish", "stm32", TERMINAL_COLOR_BLUE, "~", TERMINAL_COLOR_GREEN);
-}
-
-void daemon(void *args) {
-    for (;;) {
-        if (!task_running) {
-            os::task::sleep(10);
-            continue;
-        }
-        runtime.first(runtime.second);
-        if (force_stop) {
-            info("\r\nstopped\r\n");
-            force_stop = false;
-        }
-        show_prompt();
-        task_running = false;
-    }
 }
 
 static void solve() {
@@ -118,8 +101,13 @@ static void solve() {
 
     if (cmd.count(args[0])) {
         task_running = true;
-        // cmd[args[0]].func(args);
-        runtime = std::make_pair(cmd[args[0]].func, args);
+        cmd[args[0]].func(args);
+        if (force_stop) {
+            info("\r\nstopped\r\n");
+            force_stop = false;
+        }
+        task_running = false;
+        show_prompt();
         return;
     }
 
@@ -179,7 +167,7 @@ void recv(const uint8_t *data, size_t len) {
     for (size_t i = 0; i < len; i++) input(data[i]);
 }
 
-static void rx_daemon(void *args) {
+static void daemon(void *args) {
     uint8_t esc_buf[3] = { };
     size_t esc_len = 0;
 
@@ -214,8 +202,7 @@ void terminal::init(const bsp_uart_e port, const int baudrate) {
         &rx_queue_cb
     );
     BSP_ASSERT(rx_queue != nullptr);
-    BSP_ASSERT(daemon_task.create(daemon, nullptr, "terminal", 1024, os::task::Priority::MEDIUM));
-    BSP_ASSERT(rx_task.create(rx_daemon, nullptr, "terminal_rx", 512, os::task::Priority::MEDIUM));
+    BSP_ASSERT(terminal_task.create(daemon, nullptr, "terminal", 1024, os::task::Priority::MEDIUM));
     _port = port, _inited = true;
     if (~baudrate)
         bsp_uart_set_baudrate(port, baudrate);
@@ -224,11 +211,21 @@ void terminal::init(const bsp_uart_e port, const int baudrate) {
         if (bsp_sys_in_isr()) {
             BaseType_t hpw = pdFALSE;
             for (size_t i = 0; i < len; i++) {
+                if (data[i] == 3 and task_running) {
+                    task_running = false;
+                    force_stop = true;
+                    continue;
+                }
                 xQueueSendFromISR(rx_queue, &data[i], &hpw);
             }
             portYIELD_FROM_ISR(hpw);
         } else {
             for (size_t i = 0; i < len; i++) {
+                if (data[i] == 3 and task_running) {
+                    task_running = false;
+                    force_stop = true;
+                    continue;
+                }
                 xQueueSend(rx_queue, &data[i], 0);
             }
         }
