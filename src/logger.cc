@@ -3,7 +3,7 @@
 //
 
 #include "utils/logger.h"
-#include <cstring>
+#include <algorithm>
 #include <cstdarg>
 #include <cstdio>
 
@@ -29,15 +29,30 @@ constexpr char header_fmt[] = "[%s] <%s>: ";
 
 static void log_va(const char *prefix, const char *fmt, va_list ap) {
     if (!_inited) return;
-    static char _buf[256] = { };
-    int p;
+    char buf[256] = { };
+    int header_len;
     if (xPortIsInsideInterrupt() == pdFALSE)
-        p = std::snprintf(_buf, sizeof(_buf), header_fmt, prefix, pcTaskGetName(nullptr));
+        header_len = std::snprintf(buf, sizeof(buf), header_fmt, prefix, pcTaskGetName(nullptr));
     else
-        p = std::snprintf(_buf, sizeof(_buf), header_fmt, prefix, "isr");
-    p += std::vsnprintf(_buf + p, sizeof(_buf) - p, fmt, ap);
-    _buf[p ++] = '\n';
-    bsp_uart_send_async(_port, reinterpret_cast<const uint8_t*>(_buf), p);
+        header_len = std::snprintf(buf, sizeof(buf), header_fmt, prefix, "isr");
+
+    if (header_len < 0) return;
+
+    size_t pos = std::min(static_cast<size_t>(header_len), sizeof(buf) - 1);
+    if (pos < sizeof(buf) - 1) {
+        const int body_len = std::vsnprintf(buf + pos, sizeof(buf) - pos, fmt, ap);
+        if (body_len < 0) return;
+        pos = std::min(pos + static_cast<size_t>(body_len), sizeof(buf) - 1);
+    }
+
+    if (pos < sizeof(buf) - 1) {
+        buf[pos++] = '\n';
+    } else {
+        buf[sizeof(buf) - 2] = '\n';
+        pos = sizeof(buf) - 1;
+    }
+
+    bsp_uart_send_async(_port, reinterpret_cast<const uint8_t*>(buf), pos);
 }
 
 void logger::info(const char *fmt, ...) {

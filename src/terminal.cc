@@ -5,8 +5,11 @@
 #include "utils/terminal.h"
 #include "utils/os.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdarg>
+#include <cstdio>
+#include <unordered_map>
 
 #include "task.h"
 
@@ -30,8 +33,11 @@ namespace terminal {
     static std::string _mem[TERMINAL_CMD_MEM_SIZE];
     static int mem_ptr = 0, mem_cur_ptr = 0;
 
-    static bool task_running = false, force_stop = false;
-    static os::task daemon_task;
+    static volatile bool task_running = false, force_stop = false;
+    static os::task daemon_task, rx_task;
+    static QueueHandle_t rx_queue = nullptr;
+    static StaticQueue_t rx_queue_cb;
+    static uint8_t rx_queue_storage[128 * sizeof(uint8_t)];
     std::pair<std::function<void(std::vector<std::string>)>, std::vector<std::string>> runtime;
 }
 
@@ -56,8 +62,9 @@ void terminal::info(const char* fmt, ...) {
     uint8_t buf[256];
     const int len = vsnprintf((char *) buf, sizeof(buf), fmt, ap);
     va_end(ap);
-    BSP_ASSERT(0 < len && len <= static_cast<int>(sizeof(buf)));
-    bsp_uart_send_async(_port, buf, len);
+    if (len <= 0) return;
+    const size_t send_len = std::min(static_cast<size_t>(len), sizeof(buf) - 1);
+    bsp_uart_send_async(_port, buf, send_len);
 }
 
 void show_prompt() {
@@ -71,7 +78,10 @@ void daemon(void *args) {
             continue;
         }
         runtime.first(runtime.second);
-        if (force_stop) info("\r\nstopped\r\n"), force_stop = false;
+        if (force_stop) {
+            info("\r\nstopped\r\n");
+            force_stop = false;
+        }
         show_prompt();
         task_running = false;
     }
@@ -98,7 +108,8 @@ static void solve() {
     if (!cur.empty()) args.emplace_back(cur);
 
     if (!args.empty()) {
-        if(_mem[(mem_cur_ptr - 1) % TERMINAL_CMD_MEM_SIZE] != _buf) {
+        const int last_idx = (mem_cur_ptr + TERMINAL_CMD_MEM_SIZE - 1) % TERMINAL_CMD_MEM_SIZE;
+        if(_mem[last_idx] != _buf) {
             _mem[mem_cur_ptr] = _buf;
             mem_cur_ptr = (mem_cur_ptr + 1) % TERMINAL_CMD_MEM_SIZE;
         }
@@ -168,13 +179,59 @@ void recv(const uint8_t *data, size_t len) {
     for (size_t i = 0; i < len; i++) input(data[i]);
 }
 
+static void rx_daemon(void *args) {
+    uint8_t esc_buf[3] = { };
+    size_t esc_len = 0;
+
+    for (;;) {
+        uint8_t c = 0;
+        xQueueReceive(rx_queue, &c, portMAX_DELAY);
+
+        if (esc_len > 0) {
+            esc_buf[esc_len++] = c;
+            if (esc_len == sizeof(esc_buf)) {
+                recv(esc_buf, sizeof(esc_buf));
+                esc_len = 0;
+            }
+            continue;
+        }
+
+        if (c == 27) {
+            esc_buf[0] = c;
+            esc_len = 1;
+            continue;
+        }
+
+        input(static_cast<char>(c));
+    }
+}
+
 void terminal::init(const bsp_uart_e port, const int baudrate) {
-    daemon_task.create(daemon, nullptr, "terminal", 1024, os::task::Priority::MEDIUM);
+    rx_queue = xQueueCreateStatic(
+        sizeof(rx_queue_storage) / sizeof(rx_queue_storage[0]),
+        sizeof(uint8_t),
+        rx_queue_storage,
+        &rx_queue_cb
+    );
+    BSP_ASSERT(rx_queue != nullptr);
+    BSP_ASSERT(daemon_task.create(daemon, nullptr, "terminal", 1024, os::task::Priority::MEDIUM));
+    BSP_ASSERT(rx_task.create(rx_daemon, nullptr, "terminal_rx", 512, os::task::Priority::MEDIUM));
     _port = port, _inited = true;
     if (~baudrate)
         bsp_uart_set_baudrate(port, baudrate);
     bsp_uart_set_callback(port, [](bsp_uart_e _, const uint8_t *data, size_t len) {
-        recv(data, len);
+        if (rx_queue == nullptr) return;
+        if (bsp_sys_in_isr()) {
+            BaseType_t hpw = pdFALSE;
+            for (size_t i = 0; i < len; i++) {
+                xQueueSendFromISR(rx_queue, &data[i], &hpw);
+            }
+            portYIELD_FROM_ISR(hpw);
+        } else {
+            for (size_t i = 0; i < len; i++) {
+                xQueueSend(rx_queue, &data[i], 0);
+            }
+        }
     });
 
     register_cmd("help", [](const auto &args) {
