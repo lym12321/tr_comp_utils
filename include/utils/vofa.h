@@ -5,7 +5,10 @@
 #pragma once
 
 #include "bsp/uart.h"
+
+#ifdef BSP_ENABLE_USB_CDC
 #include "bsp/usb.h"
+#endif
 
 #include <array>
 
@@ -20,6 +23,7 @@ namespace vofa {
         bsp_uart_send_async(device, reinterpret_cast <uint8_t *> (buf.begin()), buf.size() * sizeof(float));
     }
 
+#ifdef BSP_ENABLE_USB_CDC
     // Send to USB CDC
     template <typename... Args> void send(Args... args) {
         union {
@@ -29,4 +33,5 @@ namespace vofa {
         std::array <float, sizeof...(Args) + 1> buf = { static_cast <float> (args)..., tail.f };
         bsp_usb_cdc_send(reinterpret_cast <uint8_t *> (buf.begin()), buf.size() * sizeof(float));
     }
+#endif
 }
