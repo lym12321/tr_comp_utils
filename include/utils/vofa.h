@@ -6,7 +6,7 @@
 
 #include "bsp/uart.h"
 
-#ifdef BSP_ENABLE_USB_CDC
+#if __has_include("bsp/usb.h")
 #include "bsp/usb.h"
 #endif
 
@@ -23,7 +23,7 @@ namespace vofa {
         bsp_uart_send_async(device, reinterpret_cast <uint8_t *> (buf.begin()), buf.size() * sizeof(float));
     }
 
-#ifdef BSP_ENABLE_USB_CDC
+#if __has_include("bsp/usb.h")
     // Send to USB CDC
     template <typename... Args> void send(Args... args) {
         union {

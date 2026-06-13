@@ -5,7 +5,6 @@
 #pragma once
 
 #include "bsp/uart.h"
-#include "bsp/usb.h"
 
 #define TERMINAL_CMD_MEM_SIZE 10
 

@@ -4,6 +4,8 @@
 
 #pragma once
 
+#if __has_include("bsp/can.h")
+
 #include <cstring>
 
 #include "utils/crc.h"
@@ -99,3 +101,5 @@ namespace msg {
         }
     };
 }
+
+#endif // __has_include("bsp/can.h")
