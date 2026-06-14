@@ -47,4 +47,5 @@ namespace terminal {
     void send(const uint8_t *data, size_t len);
     void info(const char *fmt, ...);
     void register_cmd(const std::string &name, const std::function<void(const std::vector<std::string> &argv)> &func, const std::string &help = "");
+    bool running();
 }

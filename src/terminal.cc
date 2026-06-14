@@ -49,6 +49,8 @@ static void fill_buf(const std::string &val) {
     info("%s", _buf.c_str());
 }
 
+bool terminal::running() { return task_running; }
+
 void terminal::send(const uint8_t* data, size_t len) {
     if (!_inited) return;
     bsp_uart_send_async(_port, data, len);
