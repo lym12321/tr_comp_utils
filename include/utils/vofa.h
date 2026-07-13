@@ -15,6 +15,7 @@
 namespace vofa {
     // Send to specified UART device
     template <typename... Args> void send(bsp_uart_e device, Args... args) {
+        static_assert((sizeof...(Args) + 1) * sizeof(float) <= BSP_UART_BUFFER_SIZE);
         union {
             const uint8_t ch[4] = { 0x00, 0x00, 0x80, 0x7f };
             float f;
@@ -26,6 +27,7 @@ namespace vofa {
 #if __has_include("bsp/usb.h")
     // Send to USB CDC
     template <typename... Args> void send(Args... args) {
+        static_assert((sizeof...(Args) + 1) * sizeof(float) <= BSP_USB_CDC_BUFFER_SIZE);
         union {
             const uint8_t ch[4] = { 0x00, 0x00, 0x80, 0x7f };
             float f;

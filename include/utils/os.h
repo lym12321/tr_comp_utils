@@ -143,7 +143,7 @@ namespace os {
     class signal {
     public:
         static bool action(task &task, int sig) {
-            BSP_ASSERT(0 <= sig and sig < 32);
+            if (sig < 0 || sig >= 32) return false;
             uint32_t bit = 1u << sig;
 
             if (bsp_sys_in_isr()) {
@@ -157,42 +157,33 @@ namespace os {
         }
 
         static bool wait(int sig, uint32_t timeout = UINT32_MAX) {
-            BSP_ASSERT(0 <= sig and sig < 32);
-            uint32_t value = 0;
-            auto task = xTaskGetCurrentTaskHandle();
-            xTaskNotifyAndQuery(task, 0, eNoAction, &value);
+            if (sig < 0 || sig >= 32) return false;
+            const uint32_t bit = 1u << sig;
+            const TickType_t start = xTaskGetTickCount();
+            TickType_t remaining = timeout;
 
-            if(value >> sig & 1) {
-                value &= ~(1 << sig);
-                xTaskNotify(task, value, eSetValueWithOverwrite);
-                return true;
+            for (;;) {
+                if ((ulTaskNotifyValueClear(nullptr, bit) & bit) != 0) return true;
+                if (remaining == 0) return false;
+
+                uint32_t value = 0;
+                if (xTaskNotifyWait(0, bit, &value, remaining) != pdTRUE) return false;
+                if ((value & bit) != 0) return true;
+
+                if (timeout == portMAX_DELAY) continue;
+                const TickType_t elapsed = xTaskGetTickCount() - start;
+                if (elapsed >= timeout) return false;
+                remaining = timeout - elapsed;
             }
-
-            if(timeout == 0) return false;
-
-            uint32_t current_time = xTaskGetTickCount();
-            while(xTaskNotifyWait(0, 1 << sig, &value, timeout) == pdTRUE) {
-                if(value >> sig & 1) {
-                    return true;
-                }
-
-                uint32_t now = xTaskGetTickCount();
-
-                if (now - current_time >= timeout) {
-                    return false;
-                }
-
-                timeout -= now - current_time;
-            }
-
-            return false;
         }
     };
 
     template <typename T>
     class queue {
     public:
-        explicit queue(unsigned long length) : queue_(xQueueCreate(length, sizeof(T))) {}
+        explicit queue(unsigned long length) : queue_(xQueueCreate(length, sizeof(T))) {
+            BSP_ASSERT(queue_ != nullptr);
+        }
         bool send(const T &data) {
             if(bsp_sys_in_isr()) {
                 BaseType_t xHigherPriorityTaskWoken = pdFALSE;
@@ -231,6 +222,10 @@ namespace os {
         [[nodiscard]] unsigned long size() const {
             return bsp_sys_in_isr() ?
                 uxQueueMessagesWaitingFromISR(queue_) : uxQueueMessagesWaiting(queue_);
+        }
+
+        [[nodiscard]] unsigned long available() const {
+            return uxQueueSpacesAvailable(queue_);
         }
     private:
         QueueHandle_t queue_;

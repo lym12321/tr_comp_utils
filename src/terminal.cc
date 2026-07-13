@@ -6,6 +6,7 @@
 #include "utils/os.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -33,7 +34,8 @@ namespace terminal {
     static std::string _mem[TERMINAL_CMD_MEM_SIZE];
     static int mem_ptr = 0, mem_cur_ptr = 0;
 
-    static volatile bool task_running = false, force_stop = false;
+    static std::atomic_bool task_running { false };
+    static std::atomic_bool force_stop { false };
     static os::task terminal_task;
     static QueueHandle_t rx_queue = nullptr;
     static StaticQueue_t rx_queue_cb;
@@ -49,7 +51,7 @@ static void fill_buf(const std::string &val) {
     info("%s", _buf.c_str());
 }
 
-bool terminal::running() { return task_running; }
+bool terminal::running() { return task_running.load(std::memory_order_relaxed); }
 
 void terminal::send(const uint8_t* data, size_t len) {
     if (!_inited) return;
@@ -91,6 +93,11 @@ static void solve() {
         }
     }
     if (!cur.empty()) args.emplace_back(cur);
+
+    if (args.empty()) {
+        show_prompt();
+        return;
+    }
 
     if (!args.empty()) {
         const int last_idx = (mem_cur_ptr + TERMINAL_CMD_MEM_SIZE - 1) % TERMINAL_CMD_MEM_SIZE;
@@ -236,7 +243,7 @@ void terminal::init(const bsp_uart_e port, const int baudrate) {
     register_cmd("help", [](const auto &args) {
         for (auto &[k, v] : cmd) {
             if (v.help.empty())
-                info("  %-10s");
+                info("  %-10s\r\n", k.c_str());
             else
                 info("  %-10s - %s\r\n", k.c_str(), v.help.c_str());
         }
