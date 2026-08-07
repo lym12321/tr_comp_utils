@@ -10,6 +10,9 @@ add_library(utils STATIC ${SOURCES})
 target_include_directories(utils PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
+target_include_directories(utils PRIVATE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/internal>
+)
 
 target_link_libraries(utils PUBLIC bsp m)
 
