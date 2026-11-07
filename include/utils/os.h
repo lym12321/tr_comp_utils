@@ -195,14 +195,14 @@ namespace os {
             }
         }
 
-        bool receive(T &data) {
+        bool receive(T& data, TickType_t ticks_to_wait = 0) {
             if(bsp_sys_in_isr()) {
                 BaseType_t xHigherPriorityTaskWoken = pdFALSE;
                 auto re = xQueueReceiveFromISR(queue_, &data, &xHigherPriorityTaskWoken);
                 portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
                 return re == pdTRUE;
             } else {
-                return xQueueReceive(queue_, &data, 0) == pdTRUE;
+                return xQueueReceive(queue_, &data, ticks_to_wait) == pdTRUE;
             }
         }
 
