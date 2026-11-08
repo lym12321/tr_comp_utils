@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstring>
 
 namespace crc8 {
     static constexpr auto offset = sizeof(uint8_t);
@@ -53,17 +54,22 @@ namespace crc16 {
     // 验证 crc16 是否正确, 数据末尾 2 Byte 作为 crc16 字段
     inline bool verify(const uint8_t *data, std::size_t size) {
         if(size < offset) return false;
-        return *reinterpret_cast<const uint16_t *>(data + size - offset) == calc(data, size - offset);
+        uint16_t expected;
+        std::memcpy(&expected, data + size - offset, sizeof(expected));
+        return expected == calc(data, size - offset);
     }
     template <typename T>
     bool verify(const T& data) {
         if(sizeof(T) < offset) return false;
-        return *reinterpret_cast <const uint16_t *> (reinterpret_cast <const uint8_t *> (&data) + sizeof(T) - offset) == calc(data);
+        uint16_t expected;
+        std::memcpy(&expected, reinterpret_cast<const uint8_t *>(&data) + sizeof(T) - offset, sizeof(expected));
+        return expected == calc(data);
     }
 
     // 为数据末尾 2 Byte 的 crc16 字段赋值
     template <typename T>
     void append(T& data) {
-        *reinterpret_cast <uint16_t *> (reinterpret_cast <uint8_t *> (&data) + sizeof(T) - offset) = calc(data);
+        const uint16_t value = calc(data);
+        std::memcpy(reinterpret_cast<uint8_t *>(&data) + sizeof(T) - offset, &value, sizeof(value));
     }
 }

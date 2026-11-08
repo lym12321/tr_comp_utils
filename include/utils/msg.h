@@ -94,8 +94,9 @@ namespace msg {
             static_assert(sizeof(T) <= UINT8_MAX);
         }
         void init() {
+            BSP_ASSERT(self == nullptr);
             self = this;
-            bsp_can_set_callback(_port, _id, &can_receiver::callback);
+            BSP_ASSERT(bsp_can_set_callback(_port, _id, &can_receiver::callback) == BSP_STATUS_OK);
         }
         struct state_t {
             T data {};

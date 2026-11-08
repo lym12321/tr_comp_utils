@@ -59,6 +59,7 @@ namespace os {
                 static void port(void *p) {
                     auto *self = static_cast <Thunk *> (p);
                     self->fn(self->arg);
+                    self->~Thunk();
                     vPortFree(self);
                     vTaskDelete(nullptr);
                 }
@@ -95,6 +96,7 @@ namespace os {
                 static void port(void *p) {
                     auto *self = static_cast <Thunk *> (p);
                     self->fn(self->arg);
+                    self->~Thunk();
                     vPortFree(self);
                     vTaskDelete(nullptr);
                 }
