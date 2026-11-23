@@ -4,51 +4,35 @@
 
 #pragma once
 
-#include "bsp/uart.h"
-
-#if __has_include("bsp/usb.h")
-#include "bsp/usb.h"
-#endif
+#include "bsp/serial.h"
 
 #if __has_include("bsp/rtt.h")
 #include "bsp/rtt.h"
 #endif
 
 #include <array>
+#include <limits>
 
 namespace vofa {
-    // Send to specified UART device
-    template <typename... Args> void send(bsp_uart_e device, Args... args) {
-        static_assert((sizeof...(Args) + 1) * sizeof(float) <= BSP_UART_BUFFER_SIZE);
-        union {
-            const uint8_t ch[4] = { 0x00, 0x00, 0x80, 0x7f };
-            float f;
-        } tail;
-        std::array <float, sizeof...(Args) + 1> buf = { static_cast <float> (args)..., tail.f };
-        bsp_uart_send_async(device, reinterpret_cast <uint8_t *> (buf.begin()), buf.size() * sizeof(float));
+    // Offline/busy output is dropped.
+    template <typename... Args> void send(bsp_serial_t port, Args... args) {
+        static_assert((sizeof...(Args) + 1) * sizeof(float) <= BSP_SERIAL_BUFFER_SIZE);
+        const std::array<float, sizeof...(Args) + 1> buf = {
+            static_cast<float>(args)..., std::numeric_limits<float>::infinity()
+        };
+        (void) bsp_serial_send_async(port, reinterpret_cast<const uint8_t *>(buf.data()), sizeof(buf));
     }
 
-#if __has_include("bsp/usb.h")
-    // Send to USB CDC
     template <typename... Args> void send(Args... args) {
-        static_assert((sizeof...(Args) + 1) * sizeof(float) <= BSP_USB_CDC_BUFFER_SIZE);
-        union {
-            const uint8_t ch[4] = { 0x00, 0x00, 0x80, 0x7f };
-            float f;
-        } tail;
-        std::array <float, sizeof...(Args) + 1> buf = { static_cast <float> (args)..., tail.f };
-        bsp_usb_cdc_send(reinterpret_cast <uint8_t *> (buf.begin()), buf.size() * sizeof(float));
+        send(E_USB_CDC_0, args...);
     }
-#endif
 
 #if __has_include("bsp/rtt.h")
     // Send to RTT channel 0
     template <typename... Args> void rtt(Args... args) {
-        union {
-            const uint8_t ch[4] = { 0x00, 0x00, 0x80, 0x7f };
-            float f;
-        } tail;
-        std::array <float, sizeof...(Args) + 1> buf = { static_cast <float> (args)..., tail.f };
+        const std::array<float, sizeof...(Args) + 1> buf = {
+            static_cast<float>(args)..., std::numeric_limits<float>::infinity()
+        };
         bsp_rtt_write(
             reinterpret_cast <const uint8_t *> (buf.data()),
             static_cast <uint32_t> (buf.size() * sizeof(float))

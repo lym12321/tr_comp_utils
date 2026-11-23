@@ -4,10 +4,11 @@
 
 #include "utils/terminal.h"
 #include "utils/os.h"
+#include "bsp/uart.h"
+#include "bsp/sys.h"
 
 #include <algorithm>
 #include <atomic>
-#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <unordered_map>
@@ -18,17 +19,12 @@ using namespace terminal;
 
 namespace terminal {
     static const uint8_t TERMINAL_CLEAR_ALL[]      = "\033[2J\033[1H";
-    static const uint8_t TERMINAL_CLEAR_LINE[]     = "\033[2K\r";
     static const uint8_t TERMINAL_CLEAR_BEHIND[]   = "\033[K";
-    static const uint8_t KEY_RIGHT[]               = "\033[C";
-    static const uint8_t KEY_LEFT[]                = "\033[D";
-    static const uint8_t KEY_SAVE[]                = "\033[s";
-    static const uint8_t KEY_LOAD[]                = "\033[u";
     struct _cmd {
         std::function<void(const std::vector<std::string>&)> func;
         std::string help;
     };
-    static bsp_uart_e _port;
+    static bsp_serial_t _port;
     static bool _inited = false;
     static std::string _buf;
     static std::string _mem[TERMINAL_CMD_MEM_SIZE];
@@ -36,26 +32,50 @@ namespace terminal {
 
     static std::atomic_bool task_running { false };
     static std::atomic_bool force_stop { false };
+    static bool rx_overflow;
+    static uint32_t rx_session, edit_session;
+    static bool discard_line = false;
     static os::task terminal_task;
-    static QueueHandle_t rx_queue = nullptr;
-    static StaticQueue_t rx_queue_cb;
-    static uint8_t rx_queue_storage[128 * sizeof(uint8_t)];
+    static uint8_t rx_bytes[BSP_SERIAL_BUFFER_SIZE];
+    static uint16_t rx_head, rx_tail;
+    static_assert((sizeof(rx_bytes) & (sizeof(rx_bytes) - 1)) == 0);
 }
 
 static std::unordered_map <std::string, _cmd> cmd;
 
 static void fill_buf(const std::string &val) {
-    for (size_t i = 0; i < _buf.size(); i++) send(KEY_LEFT, 3);
+    if (!_buf.empty()) info("\033[%uD", static_cast<unsigned>(_buf.size()));
     send(TERMINAL_CLEAR_BEHIND, 3);
     _buf = val;
-    info("%s", _buf.c_str());
+    if (!_buf.empty()) send(reinterpret_cast<const uint8_t *>(_buf.data()), _buf.size());
 }
 
-bool terminal::running() { return task_running.load(std::memory_order_relaxed); }
+bool terminal::running() {
+    return task_running.load(std::memory_order_relaxed) && edit_session == bsp_serial_session(_port);
+}
+
+bool terminal::cancelled() { return force_stop.load(std::memory_order_relaxed); }
 
 void terminal::send(const uint8_t* data, size_t len) {
-    if (!_inited) return;
-    bsp_uart_send_async(_port, data, len);
+    if (!_inited || data == nullptr || len == 0) return;
+    if (xTaskGetCurrentTaskHandle() != terminal_task.handle()) {
+        (void) bsp_serial_send_async(_port, data, len);
+        return;
+    }
+    while (len > 0) {
+        const auto size = std::min(len, static_cast<size_t>(BSP_SERIAL_BUFFER_SIZE));
+        const auto lock = bsp_sys_enter_critical();
+        const auto status = edit_session == bsp_serial_session(_port) && !cancelled()
+            ? bsp_serial_send_async(_port, data, size) : BSP_STATUS_OFFLINE;
+        bsp_sys_exit_critical(lock);
+        if (status == BSP_STATUS_BUSY) {
+            os::task::sleep(1);
+            continue;
+        }
+        if (status != BSP_STATUS_OK) return;
+        data += size;
+        len -= size;
+    }
 }
 
 void terminal::info(const char* fmt, ...) {
@@ -67,14 +87,14 @@ void terminal::info(const char* fmt, ...) {
     va_end(ap);
     if (len <= 0) return;
     const size_t send_len = std::min(static_cast<size_t>(len), sizeof(buf) - 1);
-    bsp_uart_send_async(_port, buf, send_len);
+    send(buf, send_len);
 }
 
 void show_prompt() {
     info("%s%s@%s:%s%s%s$\e[00m ", TERMINAL_COLOR_GREEN, "fish", "stm32", TERMINAL_COLOR_BLUE, "~", TERMINAL_COLOR_GREEN);
 }
 
-static void solve() {
+static void solve(bool after_cr) {
     if (_buf.empty()) {
         show_prompt();
         return;
@@ -108,14 +128,35 @@ static void solve() {
         mem_ptr = 0;
     }
 
-    if (cmd.count(args[0])) {
-        task_running = true;
-        cmd[args[0]].func(args);
-        if (force_stop) {
-            info("\r\nstopped\r\n");
-            force_stop = false;
+    vTaskSuspendAll();
+    const auto found = cmd.find(args[0]);
+    _cmd *command = found == cmd.end() ? nullptr : &found->second;
+    (void) xTaskResumeAll();
+    if (command != nullptr) {
+        const auto lock = bsp_sys_enter_critical();
+        const bool current = edit_session == bsp_serial_session(_port);
+        task_running = current;
+        // Ctrl-C may follow Enter (or CRLF) before this task has started the command.
+        uint16_t i = rx_tail;
+        if (after_cr && i != rx_head && rx_bytes[i % sizeof(rx_bytes)] == '\n') ++i;
+        for (; current && i != rx_head; ++i) {
+            const uint8_t c = rx_bytes[i % sizeof(rx_bytes)];
+            if (c == '\r' || c == '\n') break;
+            if (c == 3) {
+                rx_tail = static_cast<uint16_t>(i + 1);
+                force_stop = true;
+                task_running = false;
+                break;
+            }
         }
+        bsp_sys_exit_critical(lock);
+        if (!current) return;
+        if (running()) command->func(args);
+        const auto finished = bsp_sys_enter_critical();
         task_running = false;
+        const bool stopped = force_stop.exchange(false, std::memory_order_relaxed);
+        bsp_sys_exit_critical(finished);
+        if (stopped) info("\r\nstopped\r\n");
         show_prompt();
         return;
     }
@@ -125,6 +166,14 @@ static void solve() {
 }
 
 static void input(char c) {
+    if (discard_line) {
+        if (c == '\r' or c == '\n') {
+            discard_line = false;
+            info("\r\ninput discarded\r\n");
+            show_prompt();
+        }
+        return;
+    }
     if (c == 3) {
         // Ctrl-C
         if (!task_running) return;
@@ -135,11 +184,11 @@ static void input(char c) {
     if (c == '\r' or c == '\n') {
         info("\r\n");
         while (!_buf.empty() and _buf.back() == ' ') _buf.pop_back();
-        solve();
+        solve(c == '\r');
         _buf.clear();
         return;
     }
-    if (c == 0x7f) {
+    if (c == '\b' or c == 0x7f) {
         if (_buf.empty()) return;
         info("\b \b");
         _buf.pop_back();
@@ -148,7 +197,12 @@ static void input(char c) {
     if (c == '\t') {
         return;
     }
-    if (('a' <= c and c <= 'z') or ('0' <= c and c <= '9') or ('A' <= c and c <= 'Z') or c == ' ') {
+    if (c >= 0x20 and c <= 0x7e) {
+        if (_buf.size() >= BSP_SERIAL_BUFFER_SIZE) {
+            _buf.clear();
+            discard_line = true;
+            return;
+        }
         send(reinterpret_cast<const uint8_t *>(&c), 1);
         _buf.push_back(c);
     }
@@ -181,8 +235,38 @@ static void daemon(void *args) {
     size_t esc_len = 0;
 
     for (;;) {
-        uint8_t c = 0;
-        xQueueReceive(rx_queue, &c, portMAX_DELAY);
+        const auto lock = bsp_sys_enter_critical();
+        const auto session = bsp_serial_session(_port);
+        const bool reconnected = edit_session != session;
+        edit_session = session;
+        if (rx_session != session) {
+            rx_session = session;
+            rx_tail = rx_head;
+            rx_overflow = false;
+        }
+        const bool overflow = rx_overflow;
+        rx_overflow = false;
+        const bool available = rx_head != rx_tail;
+        const uint8_t c = available ? rx_bytes[rx_tail++ % sizeof(rx_bytes)] : 0;
+        bsp_sys_exit_critical(lock);
+
+        if (reconnected) {
+            for (auto &line : _mem) line.clear();
+            mem_ptr = mem_cur_ptr = 0;
+        }
+        if (reconnected || overflow) {
+            _buf.clear();
+            discard_line = overflow;
+            esc_len = 0;
+        }
+        if (!available) {
+            (void) ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+            continue;
+        }
+        if (discard_line) {
+            input(static_cast<char>(c));
+            continue;
+        }
 
         if (esc_len > 0) {
             esc_buf[esc_len++] = c;
@@ -203,71 +287,71 @@ static void daemon(void *args) {
     }
 }
 
-void terminal::init(const bsp_uart_e port, const int baudrate) {
-    rx_queue = xQueueCreateStatic(
-        sizeof(rx_queue_storage) / sizeof(rx_queue_storage[0]),
-        sizeof(uint8_t),
-        rx_queue_storage,
-        &rx_queue_cb
-    );
-    BSP_ASSERT(rx_queue != nullptr);
-    BSP_ASSERT(terminal_task.create(daemon, nullptr, "terminal", 1024, os::task::Priority::MEDIUM));
-    _port = port, _inited = true;
-    if (~baudrate)
-        bsp_uart_set_baudrate(port, baudrate);
-    bsp_uart_set_callback(port, [](bsp_uart_e _, const uint8_t *data, size_t len) {
-        if (rx_queue == nullptr) return;
-        if (bsp_sys_in_isr()) {
-            BaseType_t hpw = pdFALSE;
-            for (size_t i = 0; i < len; i++) {
-                if (data[i] == 3 and task_running) {
-                    task_running = false;
-                    force_stop = true;
-                    continue;
-                }
-                xQueueSendFromISR(rx_queue, &data[i], &hpw);
-            }
-            portYIELD_FROM_ISR(hpw);
-        } else {
-            for (size_t i = 0; i < len; i++) {
-                if (data[i] == 3 and task_running) {
-                    task_running = false;
-                    force_stop = true;
-                    continue;
-                }
-                xQueueSend(rx_queue, &data[i], 0);
-            }
+void terminal::init(const bsp_serial_t port, const int baudrate) {
+    BSP_ASSERT(!_inited);
+    bsp_status_t baud_status = BSP_STATUS_OK;
+    if (baudrate != -1 && static_cast<unsigned>(port) < BSP_UART_DEVICE_COUNT) {
+        BSP_ASSERT(baudrate > 0);
+        baud_status = bsp_uart_set_baudrate(port, static_cast<uint32_t>(baudrate));
+    }
+    _port = port;
+    rx_session = edit_session = bsp_serial_session(port);
+    _inited = true;
+    BSP_ASSERT(bsp_serial_set_callback(port, [](bsp_serial_t, const uint8_t *data, size_t len) {
+        const auto session = bsp_serial_session(_port);
+        if (rx_session != session) {
+            rx_session = session;
+            rx_tail = rx_head;
+            rx_overflow = false;
         }
-    });
+        for (size_t i = 0; i < len; ++i) {
+            if (data[i] == 3 && task_running && edit_session == session) {
+                force_stop = true;
+                task_running = false;
+                continue;
+            }
+            if (static_cast<uint16_t>(rx_head - rx_tail) == sizeof(rx_bytes)) {
+                rx_tail = rx_head;
+                rx_overflow = true;
+            }
+            rx_bytes[rx_head++ % sizeof(rx_bytes)] = data[i];
+        }
+        if (const auto task = terminal_task.handle()) {
+            BaseType_t wake = pdFALSE;
+            vTaskNotifyGiveFromISR(task, &wake);
+            portYIELD_FROM_ISR(wake);
+        }
+    }) == BSP_STATUS_OK);
+    if (baud_status != BSP_STATUS_OK) info("UART baud rate change failed.\r\n");
 
     register_cmd("help", [](const auto &args) {
-        for (auto &[k, v] : cmd) {
-            if (v.help.empty())
-                info("  %-10s\r\n", k.c_str());
+        std::vector<const decltype(cmd)::value_type *> entries;
+        vTaskSuspendAll();
+        entries.reserve(cmd.size());
+        for (const auto &entry : cmd) entries.push_back(&entry);
+        (void) xTaskResumeAll();
+        // Insertions may rehash the table but do not invalidate its entries.
+        for (const auto *entry : entries) {
+            const auto &[name, command] = *entry;
+            if (command.help.empty())
+                info("  %-10s\r\n", name.c_str());
             else
-                info("  %-10s - %s\r\n", k.c_str(), v.help.c_str());
+                info("  %-10s - %s\r\n", name.c_str(), command.help.c_str());
         }
     }, "Get help information for commands");
     register_cmd("clear", [](const auto &args) {
-        send(TERMINAL_CLEAR_ALL, sizeof(TERMINAL_CLEAR_ALL));
+        send(TERMINAL_CLEAR_ALL, sizeof(TERMINAL_CLEAR_ALL) - 1);
     }, "Clear the terminal screen");
-    register_cmd("man", [](const auto &args) {
-        info("what can i say???\r\n");
-    }, "what can i say???");
-
     register_cmd("reboot", [](const auto &args) {
         bsp_sys_reset();
     }, "reboot the system");
 
-    register_cmd("test", [](const auto &args) {
-        for (int i = 0; i < 30 and task_running; i++) {
-            info("%d\r\n", i);
-            os::task::sleep_seconds(1);
-        }
-    }, "test");
+    BSP_ASSERT(terminal_task.create(daemon, nullptr, "terminal", 1024, os::task::Priority::MEDIUM));
 }
 
 void terminal::register_cmd(const std::string& name, const std::function<void(const std::vector<std::string>& args)>& func, const std::string& help) {
-    BSP_ASSERT(cmd.count(name) == 0);
-    cmd[name] = { func, help };
+    BSP_ASSERT(_inited);
+    vTaskSuspendAll();
+    BSP_ASSERT(cmd.emplace(name, _cmd { func, help }).second);
+    (void) xTaskResumeAll();
 }

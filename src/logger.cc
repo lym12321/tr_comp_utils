@@ -6,7 +6,6 @@
 #include <algorithm>
 #include <cstdarg>
 #include <cstdio>
-#include <cstring>
 #include <string_view>
 
 #include "FreeRTOS.h"
@@ -18,70 +17,60 @@
 using namespace logger;
 
 namespace logger {
-    static bsp_uart_e _uart_port;
-    static level_e _uart_level;
+    static bsp_serial_t _port;
+    static bool _port_inited;
+    static level_e _level;
     static level_e _flash_level;
-    static bool _uart_inited;
     static bool _flash_inited;
 }
 
 bool logger::init_flash(level_e level) {
     if (bsp_sys_in_isr() || level < NONE || level > INFO) return false;
-    if (_flash_inited) return true;
+    if (_flash_inited) return _flash_level == level;
     if (!detail::storage_init(level != NONE)) return false;
     _flash_level = level;
     _flash_inited = true;
     return true;
 }
 
-void logger::init(bsp_uart_e port, level_e level) {
-    BSP_ASSERT(!_uart_inited);
-    _uart_port = port;
-    _uart_level = level;
-    _uart_inited = true;
+void logger::init(const bsp_serial_t port, level_e level) {
+    BSP_ASSERT(!_port_inited);
+    _level = level;
+    _port = port;
+    _port_inited = true;
 }
 
 static void log_va(level_e level, const char *prefix, const char *fmt, va_list ap) {
-    if (fmt == nullptr) return;
+    if (fmt == nullptr || bsp_sys_in_isr()) return;
 
-    const bool in_isr = bsp_sys_in_isr();
-    const unsigned long state = bsp_sys_enter_critical();
-    const bool write_flash = !in_isr && _flash_inited && _flash_level >= level;
-    const bool write_uart = _uart_inited && _uart_level >= level;
-    const bsp_uart_e uart_port = _uart_port;
-    bsp_sys_exit_critical(state);
-    if (!write_flash && !write_uart) return;
+    const bool write_flash = _flash_inited && _flash_level >= level;
+    const bool write_serial = _port_inited && _level >= level;
+    if (!write_flash && !write_serial) return;
 
-    char message[256] = { };
-    const int message_len = std::vsnprintf(message, sizeof(message), fmt, ap);
+    constexpr size_t message_capacity = 256;
+    constexpr size_t prefix_capacity = sizeof("[ERROR] <>: ") + configMAX_TASK_NAME_LEN - 1;
+    char buf[message_capacity + prefix_capacity - 1];
+    size_t pos = 0;
+    if (write_serial) {
+        const int header_len = std::snprintf(
+            buf, prefix_capacity, "[%s] <%s>: ", prefix, pcTaskGetName(nullptr)
+        );
+        if (header_len < 0) return;
+        pos = std::min(static_cast<size_t>(header_len), prefix_capacity - 1);
+    }
+    const int message_len = std::vsnprintf(buf + pos, message_capacity, fmt, ap);
     if (message_len < 0) return;
     const std::size_t message_size = std::min(
-        static_cast<std::size_t>(message_len), sizeof(message) - 1
+        static_cast<std::size_t>(message_len), message_capacity - 1
     );
     if (write_flash) {
-        (void) detail::storage_append(level, std::string_view(message, message_size));
+        (void) detail::storage_append(level, std::string_view(buf + pos, message_size));
     }
-    if (!write_uart) return;
+    if (!write_serial) return;
 
-    char buf[256] = { };
-    const char *task_name = in_isr ? "isr" : pcTaskGetName(nullptr);
-    const int header_len =
-        std::snprintf(buf, sizeof(buf), "[%s] <%s>: ", prefix, task_name);
-    if (header_len < 0) return;
-
-    size_t pos = std::min(static_cast<size_t>(header_len), sizeof(buf) - 1);
-    const std::size_t copy_size = std::min(message_size, sizeof(buf) - pos - 1);
-    std::memcpy(buf + pos, message, copy_size);
-    pos += copy_size;
-
-    if (pos < sizeof(buf) - 1) {
-        buf[pos++] = '\n';
-    } else {
-        buf[sizeof(buf) - 2] = '\n';
-        pos = sizeof(buf) - 1;
-    }
-
-    bsp_uart_send_async(uart_port, reinterpret_cast<const uint8_t*>(buf), pos);
+    pos = std::min(pos + message_size, message_capacity - 2);
+    buf[pos++] = '\n';
+    (void) bsp_serial_send_async(_port, reinterpret_cast<const uint8_t *>(buf), pos);
 }
 
 void logger::info(const char *fmt, ...) {

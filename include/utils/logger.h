@@ -7,7 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "bsp/uart.h"
+#include "bsp/serial.h"
 
 namespace logger {
     enum level_e {
@@ -16,47 +16,33 @@ namespace logger {
         WARNING,
         INFO
     };
-    void init(bsp_uart_e port, level_e level);
+    // Initialize before producers. Offline/busy output is dropped.
+    void init(bsp_serial_t port, level_e level);
+    // Call once before logging; NONE enables maintenance only.
     bool init_flash(level_e level);
+    void register_terminal_commands();
+    // Logging runs in task context.
     void info(const char *fmt, ...);
     void warn(const char *fmt, ...);
     void error(const char *fmt, ...);
 }
 
 namespace logger::flash {
-    enum class result_e {
-        OK,
-        INVALID_ARGUMENT,
-        BUSY,
-        NO_SESSION,
-        STORAGE_ERROR,
-    };
+    enum class result_e { OK, INVALID_ARGUMENT, BUSY, NO_SESSION, STORAGE_ERROR };
 
     struct info_t {
         bool storage_ready;
-        bool export_active;
+        bool export_active; // Always false; complete snapshots have been retired.
         std::uint32_t total_size;
         std::uint32_t used_size;
         std::uint32_t snapshot_size;
         std::uint32_t boot_id;
         std::uint32_t next_sequence;
         std::uint32_t queued_records;
-    };
-
-    struct export_t {
-        std::uint32_t session;
-        std::uint32_t size;
+        std::uint32_t dropped_records;
     };
 
     result_e get_info(info_t &info);
-    result_e begin_export(export_t &snapshot);
-    result_e read_export(
-        std::uint32_t session,
-        std::size_t offset,
-        std::uint8_t *data,
-        std::size_t capacity,
-        std::size_t &read_size
-    );
-    result_e end_export(std::uint32_t session);
+    // Task context. Returns after the storage task has discarded pending records and erased the log.
     result_e clear();
 }

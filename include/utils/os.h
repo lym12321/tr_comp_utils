@@ -13,6 +13,7 @@
 
 #include <utility>
 #include <new>
+#include <type_traits>
 
 namespace os {
     class task {
@@ -49,74 +50,15 @@ namespace os {
 
         template <typename Fn, typename Arg>
         bool create(Fn&& fn, Arg&& arg, const char *name, uint32_t stack_depth_words, Priority priority) {
-            using FnT = std::decay_t<Fn>;
-            using ArgT = std::decay_t<Arg>;
-
-            static_assert(std::is_invocable_r_v<void, FnT, ArgT>, "task expects callable: void fn(arg)");
-
-            struct Thunk {
-                FnT fn; ArgT arg;
-                static void port(void *p) {
-                    auto *self = static_cast <Thunk *> (p);
-                    self->fn(self->arg);
-                    self->~Thunk();
-                    vPortFree(self);
-                    vTaskDelete(nullptr);
-                }
-            };
-
-            void *mem = pvPortMalloc(sizeof(Thunk));
-            if (!mem) {
-                handle_ = nullptr;
-                return false;
-            }
-
-            auto *thunk = new (mem) Thunk { std::forward <Fn> (fn), std::forward <Arg> (arg) };
-
-            BaseType_t ok =
-                xTaskCreate(&Thunk::port, name, stack_depth_words, thunk, static_cast <UBaseType_t> (priority), &handle_);
-            if (ok != pdPASS) {
-                thunk->~Thunk();
-                vPortFree(thunk);
-                handle_ = nullptr;
-                return false;
-            }
-            return true;
+            return create_impl(std::forward<Fn>(fn), std::forward<Arg>(arg), name,
+                               stack_depth_words, priority, &handle_);
         }
 
+        // Detached handle. The callable and the task use the FreeRTOS heap.
         template <typename Fn, typename Arg>
         static bool static_create(Fn&& fn, Arg&& arg, const char *name, uint32_t stack_depth_words, Priority priority) {
-            using FnT = std::decay_t<Fn>;
-            using ArgT = std::decay_t<Arg>;
-
-            static_assert(std::is_invocable_r_v<void, FnT, ArgT>, "task expects callable: void fn(arg)");
-
-            struct Thunk {
-                FnT fn; ArgT arg;
-                static void port(void *p) {
-                    auto *self = static_cast <Thunk *> (p);
-                    self->fn(self->arg);
-                    self->~Thunk();
-                    vPortFree(self);
-                    vTaskDelete(nullptr);
-                }
-            };
-
-            void *mem = pvPortMalloc(sizeof(Thunk));
-            if (!mem) {
-                return false;
-            }
-
-            auto *thunk = new (mem) Thunk { std::forward <Fn> (fn), std::forward <Arg> (arg) };
-
-            BaseType_t ok =
-                xTaskCreate(&Thunk::port, name, stack_depth_words, thunk, static_cast <UBaseType_t> (priority), nullptr);
-            if (ok != pdPASS) {
-                thunk->~Thunk();
-                vPortFree(thunk);
-                return false;
-            }
-            return true;
+            return create_impl(std::forward<Fn>(fn), std::forward<Arg>(arg), name,
+                               stack_depth_words, priority, nullptr);
         }
 
         static void sleep(uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); }
@@ -139,6 +81,46 @@ namespace os {
         [[nodiscard]] TaskHandle_t handle() const { return handle_; }
         explicit operator bool() const { return handle_ != nullptr; }
     private:
+        template <typename Fn, typename Arg>
+        static bool create_impl(Fn&& fn, Arg&& arg, const char *name,
+                                uint32_t stack_depth_words, Priority priority,
+                                TaskHandle_t *handle) {
+            using FnT = std::decay_t<Fn>;
+            using ArgT = std::decay_t<Arg>;
+
+            static_assert(std::is_invocable_r_v<void, FnT, ArgT>, "task expects callable: void fn(arg)");
+
+            struct Thunk {
+                FnT fn; ArgT arg;
+                static void port(void *p) {
+                    auto *self = static_cast<Thunk *>(p);
+                    self->fn(self->arg);
+                    self->~Thunk();
+                    vPortFree(self);
+                    vTaskDelete(nullptr);
+                }
+            };
+
+            void *mem = pvPortMalloc(sizeof(Thunk));
+            if (!mem) {
+                if (handle != nullptr) *handle = nullptr;
+                return false;
+            }
+
+            auto *thunk = new (mem) Thunk { std::forward<Fn>(fn), std::forward<Arg>(arg) };
+            const BaseType_t ok = xTaskCreate(
+                &Thunk::port, name, stack_depth_words, thunk,
+                static_cast<UBaseType_t>(priority), handle
+            );
+            if (ok != pdPASS) {
+                thunk->~Thunk();
+                vPortFree(thunk);
+                if (handle != nullptr) *handle = nullptr;
+                return false;
+            }
+            return true;
+        }
+
         TaskHandle_t handle_ = nullptr;
     };
 
@@ -182,10 +164,19 @@ namespace os {
 
     template <typename T>
     class queue {
+        static_assert(std::is_trivially_copyable_v<T>, "queue items must be trivially copyable");
+
     public:
+        // Create during initialization and retain until reset.
         explicit queue(unsigned long length) : queue_(xQueueCreate(length, sizeof(T))) {
             BSP_ASSERT(queue_ != nullptr);
         }
+
+        queue(const queue&) = delete;
+        queue& operator=(const queue&) = delete;
+        queue(queue&&) = delete;
+        queue& operator=(queue&&) = delete;
+
         bool send(const T &data) {
             if(bsp_sys_in_isr()) {
                 BaseType_t xHigherPriorityTaskWoken = pdFALSE;
@@ -208,6 +199,7 @@ namespace os {
             }
         }
 
+        // Only valid for a queue of length one.
         bool overwrite(T &data) {
             if(bsp_sys_in_isr()) {
                 BaseType_t xHigherPriorityTaskWoken = pdFALSE;
@@ -219,6 +211,7 @@ namespace os {
             }
         }
 
+        // Task context only.
         [[nodiscard]] bool reset() const { return xQueueReset(queue_) == pdTRUE; }
 
         [[nodiscard]] unsigned long size() const {
@@ -226,6 +219,7 @@ namespace os {
                 uxQueueMessagesWaitingFromISR(queue_) : uxQueueMessagesWaiting(queue_);
         }
 
+        // Task context only.
         [[nodiscard]] unsigned long available() const {
             return uxQueueSpacesAvailable(queue_);
         }

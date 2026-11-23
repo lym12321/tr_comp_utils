@@ -15,9 +15,11 @@
 #include "bsp/time.h"
 
 namespace msg {
+    // CAN payloads use T's native layout; peers must share layout and byte order.
     template <typename T, bsp_can_e _port, uint32_t _id, int queue_size = 64>
     class can_sender {
     public:
+        // Construct during initialization and retain its address until reset.
         can_sender(uint8_t pkgs_per_ms = 1)
             : _pkgs_per_ms(pkgs_per_ms), _pkg_queue(queue_size) {
             static_assert(std::is_trivially_copyable_v<T>);
@@ -25,26 +27,34 @@ namespace msg {
             static_assert(queue_size > 0);
             BSP_ASSERT(pkgs_per_ms > 0);
         }
+
+        can_sender(const can_sender&) = delete;
+        can_sender& operator=(const can_sender&) = delete;
+        can_sender(can_sender&&) = delete;
+        can_sender& operator=(can_sender&&) = delete;
+
         T *operator()() { return &data; }
+        // Start once; send() may queue messages before this call.
         void init() {
-            BSP_ASSERT(os::task::static_create([&](void *args) {
-                auto lst_wkup = bsp_time_get_ms();
+            BSP_ASSERT(!inited);
+            BSP_ASSERT(os::task::static_create([this](void *) {
                 can_pkg_t pkg {};
                 bool pending = false;
                 for (;;) {
+                    if (!pending && !_pkg_queue.receive(pkg, portMAX_DELAY)) continue;
+                    pending = true;
                     uint8_t cur_pkgs = 0;
                     while (cur_pkgs < _pkgs_per_ms) {
-                        if (!pending) {
-                            if (!_pkg_queue.receive(pkg)) break;
-                            pending = true;
-                        }
                         if (bsp_can_send(_port, _id, pkg.data, 8) != BSP_STATUS_OK) break;
                         pending = false;
                         cur_pkgs++;
+                        if (cur_pkgs == _pkgs_per_ms || !_pkg_queue.receive(pkg)) break;
+                        pending = true;
                     }
-                    os::task::sleep_until_ms(1, lst_wkup);
+                    os::task::sleep(1);
                 }
             }, nullptr, "can_sender", 128, os::task::Priority::REALTIME));
+            inited = true;
         }
         bool send() {
             constexpr uint8_t pkg_num = (sizeof(T) + 4 + 8 - 1) / 8;
@@ -84,6 +94,7 @@ namespace msg {
         } __attribute__((packed));
         uint8_t _pkgs_per_ms;
         os::queue <can_pkg_t> _pkg_queue;
+        bool inited = false;
     };
 
     template <typename T, bsp_can_e _port, uint32_t _id>
@@ -93,6 +104,13 @@ namespace msg {
             static_assert(std::is_trivially_copyable_v<T>);
             static_assert(sizeof(T) <= UINT8_MAX);
         }
+
+        can_receiver(const can_receiver&) = delete;
+        can_receiver& operator=(const can_receiver&) = delete;
+        can_receiver(can_receiver&&) = delete;
+        can_receiver& operator=(can_receiver&&) = delete;
+
+        // Register once; the receiver must retain its address until reset.
         void init() {
             BSP_ASSERT(self == nullptr);
             self = this;
@@ -117,7 +135,7 @@ namespace msg {
         size_t ptr = 0;
         static inline can_receiver *self = nullptr;
 
-        static void callback(bsp_can_e port, uint32_t id, const uint8_t *data, size_t len) {
+        static void callback(bsp_can_e, uint32_t, const uint8_t *data, size_t len) {
             if (self != nullptr) self->handle(data, len);
         }
         void handle(const uint8_t *data, size_t len) {

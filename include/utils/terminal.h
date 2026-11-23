@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include "bsp/uart.h"
+#include "bsp/serial.h"
 
 #define TERMINAL_CMD_MEM_SIZE 10
 
@@ -33,19 +33,23 @@
 #define TERMINAL_COLOR_WHITE_L ANSI_CSI(97)   /* 亮白 */
 #define TERMINAL_COLOR_DEFAULT ANSI_CSI(39)   /* 默认 */
 
-#define TERMINAL_SEND(val, sz) bsp_uart_send_async(_port, (uint8_t *)val, sz)
-#define TERMINAL_INFO(str, args...) bsp_uart_printf_async(_port, str, ##args)
-#define TERMINAL_ERROR(str, args...) bsp_uart_printf_async(_port, TERMINAL_COLOR_RED str, ##args)
-#define TERMINAL_ERROR_BLOD(str, args...) bsp_uart_printf_async(_port, ANSI_BOLD_ON TERMINAL_COLOR_RED str ANSI_BOLD_OFF, ##args)
+#define TERMINAL_SEND(val, sz) terminal::send(reinterpret_cast<const uint8_t *>(val), sz)
+#define TERMINAL_INFO(str, args...) terminal::info(str, ##args)
+#define TERMINAL_ERROR(str, args...) terminal::info(TERMINAL_COLOR_RED str, ##args)
+#define TERMINAL_ERROR_BLOD(str, args...) terminal::info(ANSI_BOLD_ON TERMINAL_COLOR_RED str ANSI_BOLD_OFF, ##args)
 
 #include <string>
 #include <vector>
 #include <functional>
 
 namespace terminal {
-    void init(bsp_uart_e device, int baudrate = -1);
+    // Physical UARTs keep their configured rate unless a baud rate is supplied.
+    void init(bsp_serial_t port, int baudrate = -1);
     void send(const uint8_t *data, size_t len);
     void info(const char *fmt, ...);
+    // Task-only initialization registration; entries remain alive until reset.
     void register_cmd(const std::string &name, const std::function<void(const std::vector<std::string> &argv)> &func, const std::string &help = "");
     bool running();
+    // True only for explicit Ctrl-C, so a command can distinguish detaching from cancelling.
+    bool cancelled();
 }
